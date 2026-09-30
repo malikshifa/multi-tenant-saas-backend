@@ -1,0 +1,78 @@
+services:
+  mysql:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: multi_tenant_central
+    ports:
+      # Host port 3307, not 3306 — avoids clashing with a MySQL already
+      # running on the host. Only DB_HOST/DB_PORT (below) matter to the app,
+      # since containers talk to each other over the compose network.
+      - "3307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  app:
+    build: .
+    restart: unless-stopped
+    ports:
+      # Host port 8080 — change the left side if that's also taken locally;
+      # the app always listens on 8000 inside its own container regardless.
+      - "8080:8000"
+    environment: &app_env
+      APP_ENV: local
+      APP_DEBUG: "true"
+      APP_URL: http://localhost:8080
+      # Shared across all three services on purpose: they must decrypt the
+      # same values (e.g. Tenant.database_password) with the same key.
+      # Generate your own with `php artisan key:generate --show` for anything
+      # beyond a local demo.
+      APP_KEY: base64:9bYr15mASf2f4ZuWeNgx6lyXXtQFlcO8hm1ZchrNrIQ=
+      DB_CONNECTION: mysql
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_DATABASE: multi_tenant_central
+      # The app provisions a new physical database per tenant (CREATE DATABASE),
+      # which needs a privileged user — this is the simplest way to grant that
+      # for a one-command demo. A real deployment would use a scoped account.
+      DB_USERNAME: root
+      DB_PASSWORD: root
+      QUEUE_CONNECTION: database
+      SESSION_DRIVER: database
+      CACHE_STORE: database
+      MAIL_MAILER: log
+      RUN_MIGRATIONS: "true"
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  queue:
+    build: .
+    restart: unless-stopped
+    command: ["php", "artisan", "queue:work", "--sleep=1", "--tries=3"]
+    environment:
+      <<: *app_env
+      RUN_MIGRATIONS: "false"
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  scheduler:
+    build: .
+    restart: unless-stopped
+    command: ["php", "artisan", "schedule:work"]
+    environment:
+      <<: *app_env
+      RUN_MIGRATIONS: "false"
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+volumes:
+  mysql_data:
